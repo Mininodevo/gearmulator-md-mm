@@ -6,10 +6,16 @@
 #include <jni.h>
 #include <aaudio/AAudio.h>
 #include <android/log.h>
+#include <dlfcn.h>
+#include <sched.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <deque>
@@ -32,7 +38,7 @@ namespace
 {
 	constexpr uint32_t kBlock = 256;          // frames per emulator call
 	constexpr uint32_t kRingFrames = 16384;   // power of two
-	constexpr uint32_t kTargetFill = 2048;    // frames we try to keep buffered (~43 ms @ 48k)
+	constexpr uint32_t kTargetFill = 4096;    // frames we try to keep buffered (~85 ms @ 48k): more headroom against CPU hiccups
 
 	struct Cmd
 	{
@@ -57,6 +63,8 @@ namespace
 		std::atomic<uint64_t> readPos{0};
 		std::atomic<uint64_t> writePos{0};
 		std::atomic<uint32_t> underruns{0};
+		std::atomic<uint32_t> loadAvg{0};    // emulation time / audio time, in percent (smoothed)
+		std::atomic<uint32_t> loadPeak{0};   // same, slowly decaying peak
 
 		std::atomic<bool> running{false};
 		std::thread renderThread;
@@ -126,13 +134,109 @@ namespace
 		}
 	}
 
+	// The emulator runs ColdFire + both DSPs on this one thread, so it needs one fast core. Pin it to
+	// everything except the slowest cluster (on a Pixel 9: the 3 mid cores and the big core).
+	void pinToFastCores()
+	{
+		const long n = sysconf(_SC_NPROCESSORS_CONF);
+		if(n <= 1 || n > CPU_SETSIZE)
+			return;
+
+		std::vector<long> freq(static_cast<size_t>(n), 0);
+		long minF = 0, maxF = 0;
+		for(long i = 0; i < n; ++i)
+		{
+			char path[96];
+			std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_max_freq", i);
+			FILE* f = std::fopen(path, "r");
+			if(!f)
+				return;                       // not readable: leave the placement to Android
+			long v = 0;
+			const int ok = std::fscanf(f, "%ld", &v);
+			std::fclose(f);
+			if(ok != 1)
+				return;
+			freq[static_cast<size_t>(i)] = v;
+			minF = i == 0 ? v : std::min(minF, v);
+			maxF = i == 0 ? v : std::max(maxF, v);
+		}
+		if(minF == maxF)
+			return;                           // no big.LITTLE
+
+		cpu_set_t set;
+		CPU_ZERO(&set);
+		for(long i = 0; i < n; ++i)
+		{
+			if(freq[static_cast<size_t>(i)] > minF)
+				CPU_SET(static_cast<int>(i), &set);
+		}
+		if(sched_setaffinity(0, sizeof(set), &set) == 0)
+			LOGI("render thread pinned to the fast cores");
+		else
+			LOGE("sched_setaffinity failed");
+	}
+
+	// Android Dynamic Performance Framework (API 33+): tells the system how much CPU the thread needs so that
+	// it raises the clock before we underrun. Looked up at run time, so older devices simply skip it.
+	class PerfHint
+	{
+	public:
+		PerfHint() = default;
+		PerfHint(const PerfHint&) = delete;
+		PerfHint& operator=(const PerfHint&) = delete;
+		~PerfHint()
+		{
+			if(m_session && m_close)
+				m_close(m_session);
+		}
+
+		void start(const int32_t _tid, const int64_t _targetNs)
+		{
+			void* lib = dlopen("libandroid.so", RTLD_NOW);
+			if(!lib)
+				return;
+			auto getManager = reinterpret_cast<void* (*)()>(dlsym(lib, "APerformanceHint_getManager"));
+			auto create = reinterpret_cast<void* (*)(void*, const int32_t*, size_t, int64_t)>(dlsym(lib, "APerformanceHint_createSession"));
+			m_report = reinterpret_cast<int (*)(void*, int64_t)>(dlsym(lib, "APerformanceHint_reportActualWorkDuration"));
+			m_close = reinterpret_cast<void (*)(void*)>(dlsym(lib, "APerformanceHint_closeSession"));
+			if(!getManager || !create || !m_report || !m_close)
+				return;
+			void* manager = getManager();
+			if(!manager)
+				return;
+			m_session = create(manager, &_tid, 1, _targetNs);
+			LOGI(m_session ? "performance hint session active" : "performance hint session not available");
+		}
+
+		void report(const int64_t _actualNs)
+		{
+			if(m_session)
+				m_report(m_session, _actualNs);
+		}
+
+	private:
+		void* m_session = nullptr;
+		int (*m_report)(void*, int64_t) = nullptr;
+		void (*m_close)(void*) = nullptr;
+	};
+
 	void renderLoop(Engine* e)
 	{
+		const auto tid = static_cast<int32_t>(syscall(SYS_gettid));
+		setpriority(PRIO_PROCESS, static_cast<id_t>(tid), -16);   // THREAD_PRIORITY_AUDIO, ignored if refused
+		pinToFastCores();
+
+		const double blockNs = 1e9 * kBlock / static_cast<double>(e->sampleRate);
+		PerfHint hint;
+		hint.start(tid, static_cast<int64_t>(blockNs * 0.6));   // ask for ~40% headroom
+
 		std::vector<float> l(kBlock), r(kBlock);
 		synthLib::TAudioInputs in{};
 		synthLib::TAudioOutputs out{};
 		out[0] = l.data();
 		out[1] = r.data();
+
+		double avg = 0.0, peak = 0.0;
 
 		while(e->running.load(std::memory_order_relaxed))
 		{
@@ -145,8 +249,17 @@ namespace
 				continue;
 			}
 
+			const auto t0 = std::chrono::steady_clock::now();
 			drainCommands(*e);
 			e->plugin->process(in, out, kBlock, 120.0, 0.0, false, false);
+			const double busyNs = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
+
+			hint.report(static_cast<int64_t>(busyNs));
+			const double load = busyNs / blockNs;
+			avg += (load - avg) * 0.02;
+			peak = std::max(load, peak * 0.995);
+			e->loadAvg.store(static_cast<uint32_t>(avg * 100.0 + 0.5), std::memory_order_relaxed);
+			e->loadPeak.store(static_cast<uint32_t>(peak * 100.0 + 0.5), std::memory_order_relaxed);
 
 			for(uint32_t i = 0; i < kBlock; ++i)
 			{
@@ -267,6 +380,9 @@ namespace
 		// 3. go
 		e->running = true;
 		e->renderThread = std::thread(renderLoop, e);
+		// let the emulator fill the buffer first: right after boot the JIT is still translating and slowest
+		for(int i = 0; i < 500 && e->writePos.load(std::memory_order_acquire) < kTargetFill; ++i)
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		const auto startRes = AAudioStream_requestStart(e->stream);
 		if(startRes != AAUDIO_OK)
 		{
@@ -356,6 +472,8 @@ JNIEXPORT void JNICALL Java_dev_gearmulator_mdmm_NativeBridge_readLcd(JNIEnv* en
 }
 
 // out[0..15] step LEDs (0 off, 1 green, 2 red, 3 yellow), out[16..31] drum LEDs, out[32..39] status, out[40..46] mode
+// Monomachine only: out[48..67] raw panel LEDs in this order: page 0..6, bank A-D, bank E-H, pattern, song, tempo,
+// record, trig amp, trig filter, trig lfo, track page 0..3 (the MM uses a different LED bank layout than the MD)
 JNIEXPORT void JNICALL Java_dev_gearmulator_mdmm_NativeBridge_readLeds(JNIEnv* env, jclass, jintArray out)
 {
 	std::lock_guard lock(g_mutex);
@@ -363,7 +481,7 @@ JNIEXPORT void JNICALL Java_dev_gearmulator_mdmm_NativeBridge_readLeds(JNIEnv* e
 		return;
 	const auto fp = g_engine->device->getFrontPanelSnapshot();
 	const bool mm = g_engine->model == md::MachineModel::Monomachine;
-	jint buf[48] = {};
+	jint buf[80] = {};
 	for(uint32_t i = 0; i < 16; ++i)
 	{
 		buf[i] = mm ? static_cast<jint>(fp.getMonomachineStepLedColor(i)) : (fp.getStepLed(i) ? 1 : 0);
@@ -373,7 +491,37 @@ JNIEXPORT void JNICALL Java_dev_gearmulator_mdmm_NativeBridge_readLeds(JNIEnv* e
 		buf[32 + i] = fp.getStatusLed(static_cast<md::FrontPanel::StatusLed>(i)) ? 1 : 0;
 	for(uint32_t i = 0; i < 7; ++i)
 		buf[40 + i] = fp.getModeLed(static_cast<md::FrontPanel::ModeLed>(i)) ? 1 : 0;
-	env->SetIntArrayRegion(out, 0, 48, buf);
+	if(mm)
+	{
+		static const uint8_t kMmLeds[20][2] =
+		{
+			{ 0x25, 4 }, { 0x25, 5 }, { 0x25, 6 }, { 0x25, 7 }, { 0x26, 0 }, { 0x26, 1 }, { 0x26, 2 },
+			{ 0x26, 3 }, { 0x26, 4 }, { 0x26, 5 }, { 0x26, 6 }, { 0x26, 7 },
+			{ 0x27, 0 }, { 0x27, 1 }, { 0x27, 2 }, { 0x27, 3 },
+			{ 0x27, 4 }, { 0x27, 5 }, { 0x27, 6 }, { 0x27, 7 },
+		};
+		for(uint32_t i = 0; i < 20; ++i)
+			buf[48 + i] = (fp.getLedBankRaw(kMmLeds[i][0]) & (1u << kMmLeds[i][1])) == 0 ? 1 : 0;   // active low
+	}
+	env->SetIntArrayRegion(out, 0, 80, buf);
+}
+
+// 0 = Machinedrum, 1 = Monomachine (of the running engine)
+JNIEXPORT jint JNICALL Java_dev_gearmulator_mdmm_NativeBridge_model(JNIEnv*, jclass)
+{
+	std::lock_guard lock(g_mutex);
+	return g_engine && g_engine->model == md::MachineModel::Monomachine ? 1 : 0;
+}
+
+// low 16 bits: average load in percent, high 16 bits: peak load in percent (100 = exactly real time)
+JNIEXPORT jint JNICALL Java_dev_gearmulator_mdmm_NativeBridge_perf(JNIEnv*, jclass)
+{
+	std::lock_guard lock(g_mutex);
+	if(!g_engine)
+		return 0;
+	const uint32_t a = std::min<uint32_t>(g_engine->loadAvg.load(), 0xFFFFu);
+	const uint32_t p = std::min<uint32_t>(g_engine->loadPeak.load(), 0x7FFFu);
+	return static_cast<jint>(a | (p << 16));
 }
 
 JNIEXPORT jint JNICALL Java_dev_gearmulator_mdmm_NativeBridge_underruns(JNIEnv*, jclass)
