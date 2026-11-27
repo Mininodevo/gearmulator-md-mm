@@ -39,6 +39,12 @@ namespace
 	constexpr uint32_t kBlock = 256;          // frames per emulator call
 	constexpr uint32_t kRingFrames = 16384;   // power of two
 	constexpr uint32_t kTargetFill = 4096;    // frames we try to keep buffered (~85 ms @ 48k): more headroom against CPU hiccups
+	constexpr uint32_t kResumeFill = 2048;    // after an underrun: stay silent until this many frames are buffered again
+	                                          // (one clean gap instead of a burst of clicks)
+
+	// true  = render thread runs ONLY on the fastest core (on a Pixel 9: the Cortex-X4), no migration between cores
+	// false = old behaviour: fast cores + mid cores (the thread may hop between cores with different clocks)
+	constexpr bool kPinToFastestCoreOnly = true;
 
 	struct Cmd
 	{
@@ -63,6 +69,7 @@ namespace
 		std::atomic<uint64_t> readPos{0};
 		std::atomic<uint64_t> writePos{0};
 		std::atomic<uint32_t> underruns{0};
+		bool rebuffering = false;            // only touched by the audio callback
 		std::atomic<uint32_t> loadAvg{0};    // emulation time / audio time, in percent (smoothed)
 		std::atomic<uint32_t> loadPeak{0};   // same, slowly decaying peak
 
@@ -167,11 +174,11 @@ namespace
 		CPU_ZERO(&set);
 		for(long i = 0; i < n; ++i)
 		{
-			if(freq[static_cast<size_t>(i)] > minF)
+			if(kPinToFastestCoreOnly ? freq[static_cast<size_t>(i)] == maxF : freq[static_cast<size_t>(i)] > minF)
 				CPU_SET(static_cast<int>(i), &set);
 		}
 		if(sched_setaffinity(0, sizeof(set), &set) == 0)
-			LOGI("render thread pinned to the fast cores");
+			LOGI("render thread pinned to the %s", kPinToFastestCoreOnly ? "fastest core only" : "fast cores");
 		else
 			LOGE("sched_setaffinity failed");
 	}
@@ -237,6 +244,7 @@ namespace
 		out[1] = r.data();
 
 		double avg = 0.0, peak = 0.0;
+		auto lastLog = std::chrono::steady_clock::now();
 
 		while(e->running.load(std::memory_order_relaxed))
 		{
@@ -261,6 +269,16 @@ namespace
 			e->loadAvg.store(static_cast<uint32_t>(avg * 100.0 + 0.5), std::memory_order_relaxed);
 			e->loadPeak.store(static_cast<uint32_t>(peak * 100.0 + 0.5), std::memory_order_relaxed);
 
+			const auto now = std::chrono::steady_clock::now();
+			if(now - lastLog >= std::chrono::seconds(1))
+			{
+				lastLog = now;
+				LOGI("load avg=%u%% peak=%u%% underruns=%u buffered=%u frames",
+					e->loadAvg.load(std::memory_order_relaxed), e->loadPeak.load(std::memory_order_relaxed),
+					e->underruns.load(std::memory_order_relaxed),
+					static_cast<uint32_t>(e->writePos.load(std::memory_order_relaxed) - e->readPos.load(std::memory_order_relaxed)));
+			}
+
 			for(uint32_t i = 0; i < kBlock; ++i)
 			{
 				const size_t idx = static_cast<size_t>((w + i) & (kRingFrames - 1)) * 2;
@@ -278,7 +296,21 @@ namespace
 
 		const uint64_t rd = e->readPos.load(std::memory_order_relaxed);
 		const uint64_t w = e->writePos.load(std::memory_order_acquire);
-		const int32_t n = static_cast<int32_t>(std::min<uint64_t>(w - rd, static_cast<uint64_t>(frames)));
+		const uint64_t avail = w - rd;
+
+		// After an underrun, play silence until the buffer has recovered. Otherwise the audio would
+		// restart with a few frames, run dry again right away and produce a rapid series of clicks.
+		if(e->rebuffering)
+		{
+			if(avail < kResumeFill)
+			{
+				std::fill(dst, dst + frames * 2, 0.0f);
+				return AAUDIO_CALLBACK_RESULT_CONTINUE;
+			}
+			e->rebuffering = false;
+		}
+
+		const int32_t n = static_cast<int32_t>(std::min<uint64_t>(avail, static_cast<uint64_t>(frames)));
 
 		for(int32_t i = 0; i < n; ++i)
 		{
@@ -290,6 +322,7 @@ namespace
 		{
 			std::fill(dst + n * 2, dst + frames * 2, 0.0f);
 			e->underruns.fetch_add(1, std::memory_order_relaxed);
+			e->rebuffering = true;
 		}
 		e->readPos.store(rd + n, std::memory_order_release);
 		return AAUDIO_CALLBACK_RESULT_CONTINUE;
