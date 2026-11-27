@@ -24,6 +24,8 @@ android {
                     "-DCMAKE_BUILD_TYPE=Release"
                 )
                 cppFlags += "-std=c++20"
+                // build ONLY the JNI library; otherwise Gradle also links every test executable
+                targets += "mdmm"
             }
         }
     }
