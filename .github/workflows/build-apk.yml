@@ -62,12 +62,12 @@ jobs:
         with:
           gradle-version: 8.7
 
-      - name: Build debug APK
+      - name: Build release APK
         shell: bash   # com shell explicito o GitHub ativa -o pipefail e o tee nao esconde falhas
         working-directory: source/Android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
-        run: gradle assembleDebug --no-daemon --stacktrace --info 2>&1 | tee build.log
+        run: gradle assembleRelease --no-daemon --stacktrace --info 2>&1 | tee build.log
 
       # O erro real do CMake/compilador fica aqui (procure por "CMake Error" ou "error:")
       - uses: actions/upload-artifact@v4
@@ -83,5 +83,5 @@ jobs:
         if: success()
         with:
           name: apk
-          path: source/Android/app/build/outputs/apk/debug/*.apk
+          path: source/Android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
