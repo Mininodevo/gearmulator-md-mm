@@ -1,0 +1,87 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Se o repositorio foi criado a partir do zip (upload manual), os submodulos NAO
+      # existem como gitlinks e as pastas ficam vazias. Aqui clonamos pelo .gitmodules.
+      # JUCE e clap-juce-extensions nao sao necessarios (plugin JUCE esta OFF).
+      - name: Fill empty submodules
+        run: |
+          set -e
+          need="source/cpu/dsp56300 source/cpu/mc68k source/3rdparty/RmlUi source/3rdparty/freetype source/3rdparty/lunasvg source/3rdparty/cpp-terminal"
+          for p in $need; do
+            if [ -z "$(ls -A "$p" 2>/dev/null)" ]; then
+              url=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' \
+                    | awk -v p="$p" '$2==p {print $1}' \
+                    | sed 's/\.path$/.url/' \
+                    | xargs -I{} git config -f .gitmodules --get {})
+              echo "::warning::$p vazio, clonando $url"
+              rm -rf "$p"
+              git clone --depth 1 --recursive "$url" "$p"
+            fi
+          done
+          for p in $need; do
+            test -n "$(ls -A "$p")" || { echo "::error::$p continua vazio"; exit 1; }
+          done
+          test -f source/cpu/dsp56300/source/CMakeLists.txt
+
+      - name: Move the app to source/Android
+        run: |
+          mkdir -p source/Android
+          if [ -d app ]; then mv app source/Android/app; fi
+          for f in settings.gradle.kts build.gradle.kts gradle.properties; do
+            if [ -f "$f" ]; then mv "$f" source/Android/; fi
+          done
+          ls -la source/Android
+          ls -la source/Android/app/src/main/cpp
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install NDK and CMake
+        run: |
+          sdkmanager "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build release APK
+        shell: bash   # com shell explicito o GitHub ativa -o pipefail e o tee nao esconde falhas
+        working-directory: source/Android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
+        run: gradle assembleRelease --no-daemon --stacktrace --info 2>&1 | tee build.log
+
+      # O erro real do CMake/compilador fica aqui (procure por "CMake Error" ou "error:")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs
+          path: |
+            source/Android/build.log
+            source/Android/app/.cxx/**/*.txt
+            source/Android/app/.cxx/**/*.log
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: apk
+          path: source/Android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
