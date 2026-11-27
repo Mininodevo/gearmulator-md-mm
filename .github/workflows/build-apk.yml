@@ -3,7 +3,6 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    paths: ['source/Android/**', '.github/workflows/build-apk.yml']
 
 jobs:
   apk:
@@ -12,6 +11,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Put the Android project in source/Android
+        run: |
+          mkdir -p source/Android
+          if [ -f settings.gradle.kts ]; then
+            mv app build.gradle.kts settings.gradle.kts gradle.properties source/Android/
+          fi
+          ls -la source/Android
 
       - uses: actions/setup-java@v4
         with:
