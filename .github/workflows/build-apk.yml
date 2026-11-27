@@ -12,17 +12,41 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Find the app and put it in source/Android
+      - name: Move the app to source/Android
         run: |
-          F=$(find . -name mdmm_jni.cpp -not -path "./source/3rdparty/*" | head -n 1)
-          if [ -z "$F" ]; then
-            echo "ERRO: mdmm_jni.cpp nao foi encontrado. Arquivos enviados:"
-            find . -maxdepth 4 -not -path './.git/*' -not -path './source/3rdparty/*' -not -path './source/cpu/*' | head -150
-            exit 1
-          fi
-          echo "Encontrado em: $F"
-          APPDIR=$(cd "$(dirname "$F")/../../.." && pwd)
-          echo "Pasta do modulo: $APPDIR"
-          if [ "$APPDIR" = "$(pwd)" ]; then
-            echo "ERRO: os arquivos do app foram enviados soltos na raiz. Mande o print da lista de arquivos."
-            exit 1
+          mkdir -p source/Android
+          if [ -d app ]; then mv app source/Android/app; fi
+          for f in settings.gradle.kts build.gradle.kts gradle.properties; do
+            if [ -f "$f" ]; then mv "$f" source/Android/; fi
+          done
+          ls -la source/Android
+          ls -la source/Android/app/src/main/cpp
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install NDK and CMake
+        run: |
+          sdkmanager "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build debug APK
+        working-directory: source/Android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apk
+          path: source/Android/app/build/outputs/apk/debug/*.apk
