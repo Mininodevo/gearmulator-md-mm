@@ -25,6 +25,10 @@ set(gearmulator_SYNTH_88EMU            OFF CACHE BOOL "" FORCE)
 set(gearmulator_SYNTH_ELEKTRON         ON  CACHE BOOL "" FORCE)
 set(BUILD_TESTING                      OFF CACHE BOOL "" FORCE)
 
+# Android has no librt (its functions live in libc), but the dsp56300 CMake asks for -lrt.
+# An empty static library named "rt" satisfies it.
+add_library(rt STATIC rt_stub.c)
+
 add_subdirectory(${GM_ROOT} ${CMAKE_BINARY_DIR}/gearmulator EXCLUDE_FROM_ALL)
 
 add_library(mdmm SHARED mdmm_jni.cpp)
