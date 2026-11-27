@@ -14,6 +14,11 @@ object NativeBridge {
     @JvmStatic external fun midi(a: Int, b: Int, c: Int)
 
     @JvmStatic external fun readLcd(out: IntArray, on: Int, off: Int)
+    /** [out] must hold 80 ints: 0..15 steps, 16..31 drum LEDs, 32..39 status, 40..46 mode (MD), 48..67 raw panel LEDs (MM) */
     @JvmStatic external fun readLeds(out: IntArray)
+    /** 0 = Machinedrum, 1 = Monomachine (the running engine) */
+    @JvmStatic external fun model(): Int
     @JvmStatic external fun underruns(): Int
+    /** low 16 bits: average emulation load in %, high 16 bits: peak load in % (100 = exactly real time) */
+    @JvmStatic external fun perf(): Int
 }
