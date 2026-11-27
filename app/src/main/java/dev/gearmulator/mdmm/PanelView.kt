@@ -5,7 +5,6 @@ import android.graphics.*
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
-import java.util.Random
 import kotlin.math.min
 
 /**
@@ -60,11 +59,32 @@ class PanelView(context: Context) : View(context) {
 
     // ------------------------------------------------------------------ colours and paints
 
-    private val brown = 0xFF7A3E1E.toInt()
-    private val redText = 0xFFD23A1C.toInt()
-    private val ledOn = if (mm) 0xFFFFC040.toInt() else 0xFFFF8A30.toInt()
-    private val ledOff = if (mm) 0xFFA48F66.toInt() else 0xFF9A4220.toInt()
-    private val ledRingColor = if (mm) 0xFF5A4A2A.toInt() else 0xFF4A1A0C.toInt()
+    // Colours taken from the debranded desktop skins (mmSfx60 / mdDefault).
+    private val plateColor = if (mm) 0xFFD4D5D0.toInt() else 0xFFD0D1CC.toInt()
+    private val plateEdge = if (mm) 0xFF74756F.toInt() else 0xFF747570.toInt()
+    private val ruleColor = 0xFF898A84.toInt()
+    private val panelBlack = 0xFF20221F.toInt()
+    private val panelLight = 0xFFE0E1DC.toInt()
+    private val textDark = 0xFF353630.toInt()
+    private val brown = if (mm) 0xFF7B4035.toInt() else 0xFF6B382E.toInt()
+    private val redText = if (mm) 0xFFA04D39.toInt() else 0xFF8D493C.toInt()
+    private val ledOn = if (mm) 0xFFE45B3C.toInt() else 0xFFF05A3D.toInt()
+    private val ledOff = if (mm) 0xFF726B58.toInt() else 0xFF713C31.toInt()
+    private val ledRingColor = if (mm) 0xFF3A3B36.toInt() else 0xFF2B0E0A.toInt()
+    private val lcdOn = 0xFF1B2018.toInt()
+    private val lcdOff = 0xFFC0C9BA.toInt()
+
+    // skin images (assets/skins); null = fall back to the drawn look
+    private fun asset(name: String): Bitmap? = try {
+        context.assets.open("skins/$name").use { BitmapFactory.decodeStream(it) }
+    } catch (e: Exception) { null }
+
+    private val knobBmp: Bitmap? = asset(if (mm) "mm_knob.png" else "md_knob.png")
+    private val screwBmp: Bitmap? = asset(if (mm) "mm_screw.png" else "md_screw.png")
+    private val wheelBmp: Bitmap? = if (mm) null else asset("md_wheel.png")   // 8x6 frames of 128 px, 360 degrees
+    private val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val srcRect = Rect()
+    private val dstRect = RectF()
 
     private val condensed = Typeface.create("sans-serif-condensed", Typeface.BOLD)
 
@@ -73,7 +93,7 @@ class PanelView(context: Context) : View(context) {
     }
 
     private val pRed = tp(redText, 13.5f)
-    private val pDark = tp(0xFF2E2E2E.toInt(), 13f)
+    private val pDark = tp(textDark, 13f)
     private val pWhite = tp(Color.WHITE, 12f)
     private val pBrown = tp(brown, 12f)
     private val pTitle = tp(Color.WHITE, 30f)
@@ -95,7 +115,7 @@ class PanelView(context: Context) : View(context) {
 
     // soft glow around lit LEDs: [0] normal colour, [1] green, [2] red, [3] yellow (Monomachine step LEDs)
     private val glows = Array(4) { i ->
-        val col = when (i) { 1 -> 0xFF40E060.toInt(); 2 -> 0xFFFF3030.toInt(); 3 -> 0xFFFFD030.toInt(); else -> ledOn }
+        val col = when (i) { 1 -> 0xFF9FC568.toInt(); 2 -> 0xFFE65D42.toInt(); 3 -> 0xFFE4C45C.toInt(); else -> ledOn }
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = RadialGradient(0f, 0f, 17f, (col and 0x00FFFFFF) or 0x90000000.toInt(), col and 0x00FFFFFF, Shader.TileMode.CLAMP)
         }
@@ -132,8 +152,8 @@ class PanelView(context: Context) : View(context) {
         deco { c -> p.textAlign = align; c.drawText(s, x, y, p) }
     }
 
-    private fun vline(x: Float, y1: Float, y2: Float) = deco { c -> stroke.color = 0xFF8E8E8E.toInt(); stroke.strokeWidth = 1.6f; c.drawLine(x, y1, x, y2, stroke) }
-    private fun hline(y: Float, x1: Float, x2: Float) = deco { c -> stroke.color = 0xFF8E8E8E.toInt(); stroke.strokeWidth = 1.6f; c.drawLine(x1, y, x2, y, stroke) }
+    private fun vline(x: Float, y1: Float, y2: Float) = deco { c -> stroke.color = ruleColor; stroke.strokeWidth = 1.6f; c.drawLine(x, y1, x, y2, stroke) }
+    private fun hline(y: Float, x1: Float, x2: Float) = deco { c -> stroke.color = ruleColor; stroke.strokeWidth = 1.6f; c.drawLine(x1, y, x2, y, stroke) }
 
     /** label with a line on either side, like "—— MAIN OUT ——" or the bracketed "DATA ENTRY" */
     private fun bracket(s: String, x1: Float, x2: Float, y: Float, p: Paint = pDark, ticks: Boolean = false) {
@@ -141,7 +161,7 @@ class PanelView(context: Context) : View(context) {
             p.textAlign = Paint.Align.CENTER
             val mid = (x1 + x2) / 2f
             val half = p.measureText(s) / 2f + 7f
-            stroke.color = 0xFFA04828.toInt(); stroke.strokeWidth = 1.5f
+            stroke.color = redText; stroke.strokeWidth = 1.5f
             c.drawLine(x1, y - 4f, mid - half, y - 4f, stroke)
             c.drawLine(mid + half, y - 4f, x2, y - 4f, stroke)
             if (ticks) {
@@ -191,8 +211,8 @@ class PanelView(context: Context) : View(context) {
     private fun nameBox(s: String, cx: Float, cy: Float, w: Float) {
         deco { c ->
             val r = RectF(cx - w / 2, cy - 9f, cx + w / 2, cy + 9f)
-            fill.color = 0xFFCFCFCF.toInt(); c.drawRect(r, fill)
-            stroke.color = 0xFF8A8A8A.toInt(); stroke.strokeWidth = 1.2f; c.drawRect(r, stroke)
+            fill.color = 0xFFE2E1D9.toInt(); c.drawRect(r, fill)
+            stroke.color = 0xFF686963.toInt(); stroke.strokeWidth = 1.2f; c.drawRect(r, stroke)
             pDark.textAlign = Paint.Align.CENTER
             c.drawText(s, cx, cy + 4.5f, pDark)
         }
@@ -200,6 +220,12 @@ class PanelView(context: Context) : View(context) {
 
     private fun screw(x: Float, y: Float) {
         deco { c ->
+            val sb = screwBmp
+            if (sb != null) {
+                dstRect.set(x - 22f, y - 22f, x + 22f, y + 22f)
+                c.drawBitmap(sb, null, dstRect, bmpPaint)
+                return@deco
+            }
             fill.shader = RadialGradient(x - 5f, y - 5f, 26f, intArrayOf(0xFFEDEDED.toInt(), 0xFF9A9AA0.toInt(), 0xFF5E5E64.toInt()), floatArrayOf(0f, 0.6f, 1f), Shader.TileMode.CLAMP)
             c.drawCircle(x, y, 19f, fill)
             fill.shader = null
@@ -238,22 +264,22 @@ class PanelView(context: Context) : View(context) {
         deco { c ->
             c.save()
             c.clipRect(l, t, r, b)
-            fill.color = Color.BLACK
+            fill.color = panelBlack
             c.drawRect(l, t, r, b, fill)
             if (whiteFrom != null) {
-                fill.color = Color.WHITE
+                fill.color = panelLight
                 c.drawRect(l, whiteFrom, r, b, fill)
             }
-            fill.shader = LinearGradient(r - 270f, t, r + 10f, t + 190f, 0x00FFFFFF, 0xFFD8D8D8.toInt(), Shader.TileMode.CLAMP)
+            fill.shader = LinearGradient(r - 270f, t, r + 10f, t + 190f, 0x00D0D1CC, plateColor, Shader.TileMode.CLAMP)
             c.drawRect(r - 270f, t, r, t + 190f, fill)
             fill.shader = null
             c.restore()
         }
     }
 
-    private fun elektronLogo(cx: Float, y: Float) {
-        deco { c -> c.drawText("elektron", cx, y, pElektron) }
-    }
+    // the skins are debranded: no manufacturer logo
+    @Suppress("UNUSED_PARAMETER")
+    private fun elektronLogo(cx: Float, y: Float) {}
 
     // ------------------------------------------------------------------ Machinedrum layout
 
@@ -278,14 +304,6 @@ class PanelView(context: Context) : View(context) {
 
         // display area
         displayArea(541f, 88f, 1005f, 480f, 365f)
-        deco { c ->
-            fill.color = 0xFFE0701A.toInt()
-            val p = Path(); p.moveTo(616f, 193f); p.lineTo(634f, 175f); p.lineTo(650f, 175f); p.lineTo(632f, 193f); p.close(); c.drawPath(p, fill)
-            val p2 = Path(); p2.moveTo(646f, 193f); p2.lineTo(664f, 175f); p2.lineTo(680f - 12f, 175f); p2.lineTo(662f, 193f); p2.close(); c.drawPath(p2, fill)
-        }
-        text("MACHINEDRUM", 673f, 195f, pTitle, Paint.Align.LEFT)
-        text("SPS-1UW", 613f, 435f, tp(redText, 26f), Paint.Align.LEFT)
-        text("MK II  SYNTHETIC PERCUSSION SEQUENCER", 613f, 452f, tp(0xFF111111.toInt(), 11f), Paint.Align.LEFT)
         elektronLogo(1400f, 130f)
 
         // left side: master volume, classic/extended, sound selection, jog wheel, function
@@ -411,13 +429,6 @@ class PanelView(context: Context) : View(context) {
 
         // black display area with the logo
         displayArea(301f, 88f, 1252f, 478f, null)
-        deco { c ->
-            fill.color = 0xFFE03A2A.toInt()
-            for (gx in 0 until 28) for (gy in 0 until 6) c.drawCircle(343f + gx * 6.6f, 136f + gy * 6.6f, 2.2f, fill)
-        }
-        text("MONOMACHINE", 480f, 196f, pTitle, Paint.Align.LEFT)
-        text("SFX60", 342f, 424f, tp(redText, 30f), Paint.Align.LEFT)
-        text("MK II  6 TRACK MULTIPLE SYNTHESIS SEQUENCER", 342f, 440f, tp(Color.WHITE, 11f), Paint.Align.LEFT)
         elektronLogo(1120f, 150f)
         text("DATA ENTRY", 946f, 195f, pRed)
         text("LEVEL", 762f, 195f, tp(Color.WHITE, 12.5f))
@@ -550,26 +561,25 @@ class PanelView(context: Context) : View(context) {
     }
 
     private fun drawPlate(c: Canvas) {
-        // drop shadow, then brushed silver
+        // drop shadow, then the flat faceplate colour of the skin
         fill.color = 0xFF000000.toInt()
         c.drawRect(plate.left - 3f, plate.top - 3f, plate.right + 3f, plate.bottom + 3f, fill)
-        fill.shader = LinearGradient(0f, plate.top, 0f, plate.bottom, 0xFFDCDCDC.toInt(), 0xFFC0C0C0.toInt(), Shader.TileMode.CLAMP)
+        fill.color = plateColor
         c.drawRect(plate, fill)
-        fill.shader = null
-        val rnd = Random(7)
-        stroke.strokeWidth = 1f
-        for (i in 0 until 500) {
-            val y = plate.top + rnd.nextFloat() * (plate.height())
-            val x1 = plate.left + rnd.nextFloat() * plate.width()
-            val len = 80f + rnd.nextFloat() * 500f
-            stroke.color = if (rnd.nextBoolean()) 0x18FFFFFF else 0x14000000
-            c.drawLine(x1, y, min(x1 + len, plate.right), y, stroke)
-        }
-        stroke.color = 0xFF1E1E20.toInt(); stroke.strokeWidth = 3f
+        stroke.color = plateEdge; stroke.strokeWidth = 3f
         c.drawRect(plate, stroke)
     }
 
     private fun drawKnobBody(c: Canvas, k: Knob) {
+        val kb = knobBmp
+        if (k.kind == K_JOG && wheelBmp != null) return          // drawn per frame in onDraw
+        if (kb != null) {
+            fill.color = 0x40000000
+            c.drawCircle(k.cx + 2f, k.cy + 3f, k.rad + 2f, fill)
+            dstRect.set(k.cx - k.rad - 3f, k.cy - k.rad - 3f, k.cx + k.rad + 3f, k.cy + k.rad + 3f)
+            c.drawBitmap(kb, null, dstRect, bmpPaint)
+            return
+        }
         // soft shadow
         fill.color = 0x40000000
         c.drawCircle(k.cx + 2f, k.cy + 3f, k.rad + 2f, fill)
@@ -585,9 +595,9 @@ class PanelView(context: Context) : View(context) {
     private fun drawBtn(c: Canvas, b: Btn) {
         val r = b.r
         val (top, bottom) = when (b.style) {
-            LIGHT -> 0xFFFFFFFF.toInt() to 0xFFC4C4C6.toInt()
-            RED -> 0xFFEE4A2C.toInt() to 0xFFB02210.toInt()
-            else -> 0xFF30303C.toInt() to 0xFF14141B.toInt()
+            LIGHT -> 0xFFF0F0EA.toInt() to 0xFFD6D5CB.toInt()
+            RED -> 0xFFD65540.toInt() to 0xFFA63C2B.toInt()
+            else -> 0xFF4A4C46.toInt() to 0xFF2B2D29.toInt()
         }
         fill.color = 0x38000000
         c.drawRoundRect(r.left + 1.5f, r.top + 3f, r.right + 1.5f, r.bottom + 3f, 7f, 7f, fill)
@@ -618,7 +628,7 @@ class PanelView(context: Context) : View(context) {
 
     private val refresh = object : Runnable {
         override fun run() {
-            NativeBridge.readLcd(lcdPixels, 0xFF101810.toInt(), 0xFFA9C26A.toInt())
+            NativeBridge.readLcd(lcdPixels, lcdOn, lcdOff)
             NativeBridge.readLeds(leds)
 
             if (!lcdPixels.contentEquals(lcdPrev)) {
@@ -671,6 +681,20 @@ class PanelView(context: Context) : View(context) {
 
         // knob indicators (endless encoders, so they rotate freely)
         for (k in knobs) {
+            val wb = wheelBmp
+            if (k.kind == K_JOG && wb != null) {
+                // jog wheel: 48 pre-rendered frames over 360 degrees (7.5 degrees each)
+                val a = ((k.angle % 360f) + 360f) % 360f
+                val idx = Math.round(a / 7.5f) % 48
+                val sx = (idx % 8) * 128
+                val sy = (idx / 8) * 128
+                srcRect.set(sx, sy, sx + 128, sy + 128)
+                fill.color = 0x40000000
+                c.drawCircle(k.cx + 2f, k.cy + 3f, k.rad + 2f, fill)
+                dstRect.set(k.cx - k.rad - 3f, k.cy - k.rad - 3f, k.cx + k.rad + 3f, k.cy + k.rad + 3f)
+                c.drawBitmap(wb, srcRect, dstRect, bmpPaint)
+                continue
+            }
             c.save()
             c.rotate(k.angle, k.cx, k.cy)
             if (k.kind == K_JOG) c.drawCircle(k.cx, k.cy - k.rad * 0.66f, 17f, dimple)
@@ -690,9 +714,9 @@ class PanelView(context: Context) : View(context) {
                 c.save(); c.translate(l.x, l.y); c.drawCircle(0f, 0f, 17f, glows[gi]); c.restore()
                 ledPaint.color = when {
                     !stepMm -> ledOn
-                    v == 1 -> 0xFF40E060.toInt()
-                    v == 2 -> 0xFFFF3030.toInt()
-                    else -> 0xFFFFD030.toInt()
+                    v == 1 -> 0xFF9FC568.toInt()
+                    v == 2 -> 0xFFE65D42.toInt()
+                    else -> 0xFFE4C45C.toInt()
                 }
             } else {
                 ledPaint.color = ledOff
